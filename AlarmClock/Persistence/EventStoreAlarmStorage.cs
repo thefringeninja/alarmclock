@@ -13,6 +13,8 @@ namespace AlarmClock.Persistence
         public const string AlarmClockStarted = "alarm-clock-started";
         public const string AlarmFired = "alarm-fired";
         public const string AlarmSet = "alarm-set";
+        public const string AlarmClockStarting = "alarm-clock-starting";
+
         private const int PageSize = 512;
         private readonly IEventStoreConnection eventStore;
         private readonly JsonSerializerSettings serializerSettings;
@@ -34,6 +36,22 @@ namespace AlarmClock.Persistence
             var alreadyFired = new List<Guid>();
 
             var slice = await eventStore.ReadStreamEventsBackwardAsync(streamId, StreamPosition.End, PageSize, false);
+
+            if (slice.Events.Length == 0)
+                return Enumerable.Empty<TimeoutMessage>();
+
+            var readLock = await eventStore.StartTransactionAsync(streamId, slice.Events[0].OriginalEventNumber);
+            await readLock.WriteAsync(CreateAlarmClockStarting());
+
+            var allTimeoutMessages = await ReadTimeoutMessages(slice, unfiredAlarms, alreadyFired);
+
+            await readLock.CommitAsync();
+
+            return allTimeoutMessages.AsReadOnly();
+        }
+
+        private async Task<List<TimeoutMessage>> ReadTimeoutMessages(StreamEventsSlice slice, List<TimeoutMessage> unfiredAlarms, List<Guid> alreadyFired)
+        {
             bool isEndOfStream = false;
             do
             {
@@ -43,7 +61,12 @@ namespace AlarmClock.Persistence
                     // this means we are at the point when the last alarm clock started and we're done.
                     var originalEvent = resolvedEvent.OriginalEvent;
                     if (originalEvent.EventType == AlarmClockStarted)
-                        return unfiredAlarms.AsReadOnly();
+                        return unfiredAlarms;
+
+                    if (originalEvent.EventType == AlarmClockStarting)
+                    {
+                        throw new InvalidOperationException("Another instance of the alarm clock is already using stream " + streamId + ".");
+                    }
 
                     if (originalEvent.EventType == AlarmFired)
                     {
@@ -84,7 +107,7 @@ namespace AlarmClock.Persistence
                 slice = await eventStore.ReadStreamEventsBackwardAsync(streamId, slice.NextEventNumber, PageSize, false);
             } while (false == isEndOfStream);
 
-            return unfiredAlarms.AsReadOnly();
+            return unfiredAlarms;
         }
 
         public async Task SaveAsync(TimeoutMessage message)
@@ -133,6 +156,11 @@ namespace AlarmClock.Persistence
         {
             return new EventData(Guid.NewGuid(), AlarmClockStarted, false, null, null);
         }
+        private EventData CreateAlarmClockStarting()
+        {
+            return new EventData(Guid.NewGuid(), AlarmClockStarting, false, null, null);
+        }
+
 
         private EventData CreateAlarmFired(TimeoutMessage timeout)
         {

@@ -2,6 +2,7 @@
 using System.Linq;
 using System.Threading;
 using AlarmClock.Persistence;
+using EventStore.ClientAPI;
 using Newtonsoft.Json;
 using NUnit.Framework;
 
@@ -113,5 +114,21 @@ namespace AlarmClock.Tests
             Assert.IsTrue(wait.WaitOne(TimeSpan.FromSeconds(5)));
         }
 
+        [Test]
+        public void multiple_alarm_clocks_cannot_use_the_same_stream()
+        {
+            alarmStorage.InitializeAsync(
+                new[] { new Timeout<Message>(new SomeEvent(1), DateTime.UtcNow.AddDays(-1), Guid.NewGuid()) })
+                .Wait();
+
+            // pretending that someone else has started reading. probably not the best way to test.
+            EventStore.Connection.AppendToStream(streamId, ExpectedVersion.Any, new EventData(Guid.NewGuid(), EventStoreAlarmStorage.AlarmClockStarting, false, null, null));
+
+            var ex = Assert.Throws<AggregateException>(sut.Start).Flatten().GetBaseException();
+
+            Assert.IsInstanceOf<InvalidOperationException>(ex);
+
+            Assert.AreEqual("Another instance of the alarm clock is already using stream " + streamId + ".", ex.Message);
+        }
     }
 }
